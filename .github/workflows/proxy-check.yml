@@ -1,4 +1,4 @@
-name: Proxy Scraper Checker
+name: 每3小时跑一次
 
 on:
   schedule:
