@@ -1,0 +1,49 @@
+name: Proxy Scraper Checker
+
+on:
+  schedule:
+    # GitHub cron 使用 UTC。北京时间每天 08:00 = UTC 00:00
+    - cron: '0 0 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download latest Linux binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/psc-bin
+          ASSET_URL=$(gh api repos/monosans/proxy-scraper-checker/releases/latest \
+            --jq '.assets[] | select(.name | test("x86_64-unknown-linux-gnu")) | .browser_download_url' \
+            | head -n1)
+          test -n "$ASSET_URL"
+          echo "Downloading: $ASSET_URL"
+          curl -fL "$ASSET_URL" -o /tmp/psc.tar.gz
+          tar -xzf /tmp/psc.tar.gz -C /tmp/psc-bin --strip-components=1
+
+          BIN=$(find /tmp/psc-bin -type f -name proxy-scraper-checker | head -n1)
+          test -n "$BIN"
+          chmod +x "$BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Run checker
+        run: |
+          "$BIN"
+
+      - name: Upload output
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-list-${{ github.run_number }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
