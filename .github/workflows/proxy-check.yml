@@ -2,12 +2,16 @@ name: Proxy Scraper Checker
 
 on:
   schedule:
-    # GitHub cron 使用 UTC。北京时间每天 08:00 = UTC 00:00
+    # UTC。北京时间每天 08:00 = UTC 00:00
     - cron: '0 0 * * *'
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -17,19 +21,36 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Download latest Linux binary
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p /tmp/psc-bin
+          mkdir -p /tmp/psc-bin /tmp/psc-dl
+
           ASSET_URL=$(gh api repos/monosans/proxy-scraper-checker/releases/latest \
             --jq '.assets[] | select(.name | test("x86_64-unknown-linux-gnu")) | .browser_download_url' \
             | head -n1)
           test -n "$ASSET_URL"
           echo "Downloading: $ASSET_URL"
-          curl -fL "$ASSET_URL" -o /tmp/psc.tar.gz
-          tar -xzf /tmp/psc.tar.gz -C /tmp/psc-bin --strip-components=1
+
+          FILENAME=$(basename "$ASSET_URL")
+          curl -fL "$ASSET_URL" -o "/tmp/psc-dl/$FILENAME"
+
+          case "$FILENAME" in
+            *.zip)
+              unzip -q "/tmp/psc-dl/$FILENAME" -d /tmp/psc-bin
+              ;;
+            *.tar.gz|*.tgz)
+              tar -xzf "/tmp/psc-dl/$FILENAME" -C /tmp/psc-bin --strip-components=1
+              ;;
+            *)
+              echo "Unsupported archive: $FILENAME"
+              exit 1
+              ;;
+          esac
 
           BIN=$(find /tmp/psc-bin -type f -name proxy-scraper-checker | head -n1)
           test -n "$BIN"
@@ -41,9 +62,27 @@ jobs:
           "$BIN"
 
       - name: Upload output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: proxy-list-${{ github.run_number }}
           path: out/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
+
+      - name: Commit results
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # out/ 可能被 .gitignore 忽略，这里强制加入
+          git add -f out
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update proxy list $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          git push
