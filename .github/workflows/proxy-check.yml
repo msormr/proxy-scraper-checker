@@ -1,9 +1,9 @@
-name: 每3小时跑一次
+name: 每2小时跑一次
 
 on:
   schedule:
-    # UTC 每 3 小时一次：00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00
-    - cron: '0 */3 * * *'
+    # UTC 每 3 小时一次
+    - cron: '0 */2 * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -61,6 +61,73 @@ jobs:
         run: |
           "$BIN"
 
+      - name: Split by protocol and country
+        run: |
+          python3 - <<'PY'
+          import json, os, re, shutil
+
+          def safe(s):
+              return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(s)).strip('_') or 'unknown'
+
+          try:
+              with open('out/proxies.json', encoding='utf-8') as f:
+                  data = json.load(f)
+          except FileNotFoundError:
+              print('out/proxies.json not found, skipping split.')
+              raise SystemExit(0)
+
+          # 兼容多种可能的结构，统一成 (protocol, "ip:port", country) 列表
+          entries = []
+
+          def add(proto, line, country):
+              entries.append((str(proto or 'unknown'), line, country))
+
+          if isinstance(data, dict):
+              for proto, items in data.items():
+                  if not isinstance(items, list):
+                      items = [items]
+                  for item in items:
+                      if isinstance(item, str):
+                          add(proto, item, None)
+                      elif isinstance(item, dict):
+                          ip, port = item.get('ip'), item.get('port')
+                          if ip and port:
+                              add(proto, f'{ip}:{port}', item.get('country'))
+          elif isinstance(data, list):
+              for item in data:
+                  if not isinstance(item, dict):
+                      continue
+                  ip, port = item.get('ip'), item.get('port')
+                  if not (ip and port):
+                      continue
+                  proto = item.get('protocol') or item.get('type') or 'unknown'
+                  add(proto, f'{ip}:{port}', item.get('country'))
+
+          by_proto, by_country = {}, {}
+          missing_country = 0
+          for proto, line, country in entries:
+              by_proto.setdefault(proto, set()).add(line)
+              if country:
+                  by_country.setdefault(str(country).upper(), set()).add(line)
+              else:
+                  missing_country += 1
+
+          shutil.rmtree('out/by-protocol', ignore_errors=True)
+          shutil.rmtree('out/by-country', ignore_errors=True)
+
+          os.makedirs('out/by-protocol', exist_ok=True)
+          for proto, lines in by_proto.items():
+              with open(f'out/by-protocol/{safe(proto)}.txt', 'w', encoding='utf-8') as f:
+                  f.write('\n'.join(sorted(lines)) + '\n')
+
+          os.makedirs('out/by-country', exist_ok=True)
+          for country, lines in by_country.items():
+              with open(f'out/by-country/{safe(country)}.txt', 'w', encoding='utf-8') as f:
+                  f.write('\n'.join(sorted(lines)) + '\n')
+
+          print(f'entries: {len(entries)}, protocols: {len(by_proto)}, countries: {len(by_country)}, missing country: {missing_country}')
+          PY
+
       - name: Upload output
         if: always()
         uses: actions/upload-artifact@v4
@@ -76,7 +143,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -f out
+          git add -A -f out
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
@@ -91,9 +158,8 @@ jobs:
             git fetch origin "$BRANCH"
 
             if ! git rebase "origin/$BRANCH"; then
-              # out/ 是生成物，冲突时保留本地刚生成的内容
               git checkout --theirs -- out 2>/dev/null || true
-              git add -f out
+              git add -A -f out
               GIT_EDITOR=true git rebase --continue || {
                 echo "Rebase failed, aborting."
                 git rebase --abort
